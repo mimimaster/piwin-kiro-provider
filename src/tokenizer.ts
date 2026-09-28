@@ -1,13 +1,12 @@
-// ABOUTME: Token counting using js-tiktoken with lazy-loaded cl100k_base encoding.
-// ABOUTME: Provides accurate token counts for Kiro API response content.
 
-import { encodingForModel } from "js-tiktoken";
+import { Tiktoken } from 'js-tiktoken/lite';
+import cl100k_base from 'js-tiktoken/ranks/cl100k_base';
 
-let encoder: ReturnType<typeof encodingForModel> | null = null;
+let encoder = null;
 
 function getEncoder() {
   if (!encoder) {
-    encoder = encodingForModel("gpt-4");
+    encoder = new Tiktoken(cl100k_base);
   }
   return encoder;
 }

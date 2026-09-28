@@ -1,0 +1,16 @@
+{
+  "name": "piwin-kiro-provider",
+  "version": "0.12.1-piwin.1",
+  "description": "Kiro (AWS CodeWhisperer/Q) provider adapted for piwin Host OAuth and model management",
+  "type": "module",
+  "license": "MIT",
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*"
+  }
+}

@@ -148,31 +148,35 @@ async function loginKiroInternal(
   callbacks: OAuthLoginCallbacks,
   preferredMethod: KiroLoginMethod = "auto",
 ): Promise<OAuthCredentials> {
-  const { getKiroCliCredentials, getKiroCliCredentialsAllowExpired, getKiroCliSocialToken } = await import(
+  const { getKiroCliCredentials, getKiroCliSocialToken } = await import(
     "./kiro-cli.js"
   );
 
-  // If user explicitly wants social login, delegate to kiro-cli
-  if (preferredMethod === "google" || preferredMethod === "github") {
-    return loginViaKiroCli(callbacks, preferredMethod);
-  }
-
+  // 1. If valid cached credentials exist from Kiro IDE or kiro-cli, reuse them
   const ideCreds = getKiroIdeCredentials();
-  const cliCreds = getKiroCliSocialToken() || getKiroCliCredentials();
-  const expiredIdeCreds = getKiroIdeCredentialsAllowExpired();
-  const expiredCreds = getKiroCliCredentialsAllowExpired();
-
-  const hasCached = Boolean(ideCreds || cliCreds || expiredIdeCreds || expiredCreds);
-
-  const { interactiveLogin } = await import("./login.js");
-  const result = await interactiveLogin(callbacks, hasCached);
-
-  if (result !== "use-cached-credentials") {
-    return result;
+  if (ideCreds && ideCreds.access && (!ideCreds.expires || ideCreds.expires > Date.now() + 60000)) {
+    (callbacks as unknown as { onProgress?: (msg: string) => void }).onProgress?.(
+      "Using existing Kiro IDE credentials",
+    );
+    return ideCreds;
   }
 
-  // User chose to use cached credentials from the TUI menu
-  return useCachedCascade(callbacks, preferredMethod);
+  const cliCreds = getKiroCliSocialToken() || getKiroCliCredentials();
+  if (cliCreds && cliCreds.access && (!cliCreds.expires || cliCreds.expires > Date.now() + 60000)) {
+    (callbacks as unknown as { onProgress?: (msg: string) => void }).onProgress?.(
+      "Using existing kiro-cli credentials",
+    );
+    return cliCreds;
+  }
+
+  // 2. If KIRO_API_KEY environment variable is configured, validate and use it
+  if (process.env.KIRO_API_KEY?.startsWith("ksk_")) {
+    return loginKiroWithApiKey(callbacks, process.env.KIRO_API_KEY);
+  }
+
+  // 3. Directly launch web browser OAuth flow (Google, GitHub, AWS Builder ID)
+  const { runSocialLoginFlow } = await import("./login.js");
+  return runSocialLoginFlow(callbacks);
 }
 
 async function useCachedCascade(
