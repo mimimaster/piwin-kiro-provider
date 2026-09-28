@@ -1,4 +1,4 @@
-import{createRequire as __kiroCreateRequire}from'node:module';const require=__kiroCreateRequire(import.meta.url);
+import { createRequire as __kiroCreateRequire } from 'node:module'; const require = __kiroCreateRequire(import.meta.url);
 var __create = Object.create;
 var __defProp = Object.defineProperty;
 var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
@@ -433,7 +433,8 @@ function readKiroIdeToken(allowExpired) {
       clientId,
       clientSecret,
       region,
-      authMethod: "idc"
+      authMethod: "idc",
+      ...tokenData.provider === "BuilderId" || !tokenData.provider ? { profileArn: BUILDER_ID_PROFILE_ARN } : {}
     };
   } catch {
     return void 0;
@@ -442,12 +443,13 @@ function readKiroIdeToken(allowExpired) {
 function getKiroIdeCredentials() {
   return readKiroIdeToken(false);
 }
-var SSO_CACHE_DIR, KIRO_IDE_TOKEN_PATH;
+var SSO_CACHE_DIR, KIRO_IDE_TOKEN_PATH, BUILDER_ID_PROFILE_ARN;
 var init_kiro_ide = __esm({
   "src/kiro-ide.ts"() {
     "use strict";
     SSO_CACHE_DIR = join4(homedir4(), ".aws", "sso", "cache");
     KIRO_IDE_TOKEN_PATH = join4(SSO_CACHE_DIR, "kiro-auth-token.json");
+    BUILDER_ID_PROFILE_ARN = "arn:aws:codewhisperer:us-east-1:638616132270:profile/AAAACCCCXXXX";
   }
 });
 
@@ -1436,7 +1438,7 @@ async function refreshKiroTokenDirect(credentials) {
     isEnterprise: credentials.isEnterprise
   };
 }
-var BUILDER_ID_START_URL, BUILDER_ID_PROFILE_ARN, KIRO_DESKTOP_REFRESH_URL, SSO_SCOPES, KIRO_DESKTOP_USER_AGENT, EXPIRES_BUFFER_MS;
+var BUILDER_ID_START_URL, KIRO_DESKTOP_REFRESH_URL, SSO_SCOPES, KIRO_DESKTOP_USER_AGENT, EXPIRES_BUFFER_MS;
 var init_oauth = __esm({
   "src/oauth.ts"() {
     "use strict";
@@ -1444,7 +1446,6 @@ var init_oauth = __esm({
     init_endpoints();
     init_kiro_ide();
     BUILDER_ID_START_URL = "https://view.awsapps.com/start";
-    BUILDER_ID_PROFILE_ARN = "arn:aws:codewhisperer:us-east-1:638616132270:profile/AAAACCCCXXXX";
     KIRO_DESKTOP_REFRESH_URL = "https://prod.{region}.auth.desktop.kiro.dev/refreshToken";
     SSO_SCOPES = [
       "codewhisperer:completions",

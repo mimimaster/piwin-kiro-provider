@@ -16,6 +16,8 @@ import type { KiroCredentials } from "./oauth.js";
 const SSO_CACHE_DIR = join(homedir(), ".aws", "sso", "cache");
 const KIRO_IDE_TOKEN_PATH = join(SSO_CACHE_DIR, "kiro-auth-token.json");
 
+export const BUILDER_ID_PROFILE_ARN = "arn:aws:codewhisperer:us-east-1:638616132270:profile/AAAACCCCXXXX";
+
 interface KiroIdeTokenFile {
   accessToken: string;
   refreshToken: string;
@@ -71,6 +73,7 @@ function readKiroIdeToken(allowExpired: boolean): KiroCredentials | undefined {
       clientSecret,
       region,
       authMethod: "idc",
+      ...(tokenData.provider === "BuilderId" || !tokenData.provider ? { profileArn: BUILDER_ID_PROFILE_ARN } : {}),
     };
   } catch {
     return undefined;

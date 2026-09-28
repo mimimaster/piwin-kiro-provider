@@ -10,12 +10,12 @@
 import type { OAuthCredentials, OAuthLoginCallbacks } from "@earendil-works/pi-ai";
 import { formatSafeError } from "./debug.js";
 import { resolveApiRegion } from "./endpoints.js";
-import { getKiroIdeCredentials, getKiroIdeCredentialsAllowExpired } from "./kiro-ide.js";
+import { BUILDER_ID_PROFILE_ARN, getKiroIdeCredentials, getKiroIdeCredentialsAllowExpired } from "./kiro-ide.js";
 import { interactiveLogin, loginViaKiroCli } from "./login.js";
 
 export const SSO_OIDC_ENDPOINT = "https://oidc.us-east-1.amazonaws.com";
 export const BUILDER_ID_START_URL = "https://view.awsapps.com/start";
-export const BUILDER_ID_PROFILE_ARN = "arn:aws:codewhisperer:us-east-1:638616132270:profile/AAAACCCCXXXX";
+export { BUILDER_ID_PROFILE_ARN };
 export const KIRO_DESKTOP_REFRESH_URL = "https://prod.{region}.auth.desktop.kiro.dev/refreshToken";
 export const SSO_SCOPES = [
   "codewhisperer:completions",
