@@ -77,6 +77,16 @@ export const TOOL_RESULT_LIMIT = 250000;
  *  tool turns; that fabricates a user utterance the model reads as human. */
 export const EMPTY_CONTENT_PLACEHOLDER = "Please proceed with the task.";
 
+/** Opening user turn synthesized when a conversation reaches the provider
+ *  starting mid-turn — an assistant tool call whose user request the caller
+ *  did not include (host-side truncation, a replay window, a trimmed tail).
+ *  Kiro requires a user opener; dropping the leading assistant instead
+ *  cascades through the whole tool loop and, in the worst case, through the
+ *  current message, so the model receives no history at all and loops asking
+ *  what the task is. The text states a fact about the transcript rather than
+ *  impersonating a user request. */
+export const HISTORY_OMITTED_OPENER = "[Earlier conversation omitted]";
+
 export function sanitizeSurrogates(text: string): string {
   // Replace unpaired high surrogates (0xD800-0xDBFF not followed by low surrogate)
   // Replace unpaired low surrogates (0xDC00-0xDFFF not preceded by high surrogate)

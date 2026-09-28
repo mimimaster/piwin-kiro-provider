@@ -4728,115 +4728,11 @@ function parseKiroEventByShape(parsed) {
   return null;
 }
 
-// src/history.ts
-var HISTORY_LIMIT = 85e4;
-var HISTORY_LIMIT_CONTEXT_WINDOW = 2e5;
-var HISTORY_IMAGE_BASE64_LIMIT = 512 * 1024;
-function stripHistoryImages(history, keepNewestBounded = true) {
-  let newestImageIndex = -1;
-  for (let index = history.length - 1; index >= 0; index--) {
-    if ((history[index]?.userInputMessage?.images?.length ?? 0) > 0) {
-      newestImageIndex = index;
-      break;
-    }
-  }
-  const newestImages = newestImageIndex >= 0 ? history[newestImageIndex]?.userInputMessage?.images : void 0;
-  const keepNewest = keepNewestBounded && newestImages !== void 0 && newestImages.reduce((size, image) => size + image.source.bytes.length, 0) <= HISTORY_IMAGE_BASE64_LIMIT;
-  return history.map((entry, index) => {
-    if (!entry.userInputMessage?.images || index === newestImageIndex && keepNewest) return entry;
-    const { images: _images, ...rest } = entry.userInputMessage;
-    return { ...entry, userInputMessage: { ...rest } };
-  });
-}
-function sanitizeHistory(history) {
-  while (history.length > 0 && (!history[0]?.userInputMessage || history[0].userInputMessage.userInputMessageContext?.toolResults))
-    history = history.slice(1);
-  const result = [];
-  for (let i = 0; i < history.length; i++) {
-    const m = history[i];
-    if (!m) continue;
-    if (m.assistantResponseMessage && !m.assistantResponseMessage.toolUses && !m.assistantResponseMessage.content)
-      continue;
-    if (m.assistantResponseMessage?.toolUses) {
-      const next = history[i + 1];
-      if (next?.userInputMessage?.userInputMessageContext?.toolResults) result.push(m);
-    } else if (m.userInputMessage?.userInputMessageContext?.toolResults) {
-      const prev = result[result.length - 1];
-      if (prev?.assistantResponseMessage?.toolUses) result.push(m);
-    } else {
-      result.push(m);
-    }
-  }
-  return result;
-}
-function injectSyntheticToolCalls(history) {
-  const validIds = /* @__PURE__ */ new Set();
-  for (const entry of history) {
-    for (const tu of entry.assistantResponseMessage?.toolUses ?? []) {
-      if (tu.toolUseId) validIds.add(tu.toolUseId);
-    }
-  }
-  const result = [];
-  for (const entry of history) {
-    const toolResults = entry.userInputMessage?.userInputMessageContext?.toolResults;
-    if (toolResults) {
-      const orphaned = toolResults.filter((tr) => !validIds.has(tr.toolUseId));
-      if (orphaned.length > 0) {
-        result.push({
-          assistantResponseMessage: {
-            content: "Tool calls were made.",
-            toolUses: orphaned.map((tr) => ({ name: "unknown_tool", toolUseId: tr.toolUseId, input: {} }))
-          }
-        });
-        for (const tr of orphaned) validIds.add(tr.toolUseId);
-      }
-    }
-    result.push(entry);
-  }
-  return result;
-}
-function prepareHistory(history, keepNewestBoundedImage = true) {
-  return injectSyntheticToolCalls(sanitizeHistory(stripHistoryImages(history, keepNewestBoundedImage)));
-}
-function assertHistoryWithinLimit(history, limit) {
-  const size = JSON.stringify(history).length;
-  if (size > limit) {
-    throw new Error(
-      `Kiro API error: context_length_exceeded (local history ${size} chars / ${history.length} entries exceeds ${limit}-char limit)`
-    );
-  }
-}
-function extractToolNamesFromHistory(history) {
-  const names = /* @__PURE__ */ new Set();
-  for (const entry of history) {
-    for (const tu of entry.assistantResponseMessage?.toolUses ?? []) {
-      if (tu.name) names.add(tu.name);
-    }
-  }
-  return names;
-}
-function addPlaceholderTools(tools, history) {
-  const historyNames = extractToolNamesFromHistory(history);
-  if (historyNames.size === 0) return tools;
-  const existing = new Set(tools.map((t) => t.toolSpecification?.name).filter(Boolean));
-  const missing = Array.from(historyNames).filter((n) => !existing.has(n));
-  if (missing.length === 0) return tools;
-  return [
-    ...tools,
-    ...missing.map((name) => ({
-      toolSpecification: {
-        name,
-        description: "Tool",
-        inputSchema: { json: { type: "object", properties: {} } }
-      }
-    }))
-  ];
-}
-
 // src/transform.ts
 import { createHash as createHash2 } from "node:crypto";
 var TOOL_RESULT_LIMIT = 25e4;
 var EMPTY_CONTENT_PLACEHOLDER = "Please proceed with the task.";
+var HISTORY_OMITTED_OPENER = "[Earlier conversation omitted]";
 function sanitizeSurrogates(text) {
   return text.replace(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g, "");
 }
@@ -5180,6 +5076,25 @@ function validateKiroConversation(entries) {
   ].filter((e) => e !== null);
   return { valid: errors.length === 0, errors };
 }
+function openOnUserTurn(entries, modelId, options) {
+  let working = entries;
+  const minLength = options.keepLast ? 1 : 0;
+  while (working.length > minLength && isUserEntry(working[0]) && hasToolResults(working[0]) && !hasText(working[0]))
+    working = working.slice(1);
+  const first = working[0];
+  if (isUserEntry(first) && hasToolResults(first) && hasText(first)) {
+    const { userInputMessageContext, ...rest } = first?.userInputMessage;
+    const tools = userInputMessageContext?.tools;
+    return [
+      { userInputMessage: { ...rest, ...tools ? { userInputMessageContext: { tools } } : {} } },
+      ...working.slice(1)
+    ];
+  }
+  if (isAssistantEntry(first)) {
+    return [{ userInputMessage: { content: HISTORY_OMITTED_OPENER, modelId, origin: "KIRO_CLI" } }, ...working];
+  }
+  return working;
+}
 function kiroConversationEntries(history, currentUserMessage) {
   return currentUserMessage ? [...history, { userInputMessage: currentUserMessage }] : [...history];
 }
@@ -5187,8 +5102,7 @@ function repairKiroConversation(entries) {
   const diagnostics = validateKiroConversation(entries).errors;
   if (diagnostics.length === 0) return { entries, diagnostics, remaining: [] };
   const modelId = entries.find((e) => e.userInputMessage?.modelId)?.userInputMessage?.modelId ?? "";
-  let working = [...entries];
-  while (working.length > 0 && (!isUserEntry(working[0]) || hasToolResults(working[0]))) working = working.slice(1);
+  let working = [...openOnUserTurn(entries, modelId, { keepLast: true })];
   const consolidated = [];
   for (let i = 0; i < working.length; i++) {
     const entry = working[i];
@@ -5300,6 +5214,116 @@ function syntheticToolResultEntry(toolUseIds, modelId) {
       userInputMessageContext: { toolResults: toolUseIds.map(syntheticFailedToolResult) }
     }
   };
+}
+
+// src/history.ts
+var HISTORY_LIMIT = 85e4;
+var HISTORY_LIMIT_CONTEXT_WINDOW = 2e5;
+var HISTORY_IMAGE_BASE64_LIMIT = 512 * 1024;
+function stripHistoryImages(history, keepNewestBounded = true) {
+  let newestImageIndex = -1;
+  for (let index = history.length - 1; index >= 0; index--) {
+    if ((history[index]?.userInputMessage?.images?.length ?? 0) > 0) {
+      newestImageIndex = index;
+      break;
+    }
+  }
+  const newestImages = newestImageIndex >= 0 ? history[newestImageIndex]?.userInputMessage?.images : void 0;
+  const keepNewest = keepNewestBounded && newestImages !== void 0 && newestImages.reduce((size, image) => size + image.source.bytes.length, 0) <= HISTORY_IMAGE_BASE64_LIMIT;
+  return history.map((entry, index) => {
+    if (!entry.userInputMessage?.images || index === newestImageIndex && keepNewest) return entry;
+    const { images: _images, ...rest } = entry.userInputMessage;
+    return { ...entry, userInputMessage: { ...rest } };
+  });
+}
+function sanitizeHistory(history) {
+  const modelId = history.find((entry) => entry.userInputMessage?.modelId)?.userInputMessage?.modelId ?? "";
+  history = openOnUserTurn(history, modelId, { keepLast: false });
+  const result = [];
+  for (let i = 0; i < history.length; i++) {
+    const m = history[i];
+    if (!m) continue;
+    if (m.assistantResponseMessage && !m.assistantResponseMessage.toolUses && !m.assistantResponseMessage.content)
+      continue;
+    if (m.assistantResponseMessage?.toolUses) {
+      const next = history[i + 1];
+      if (next?.userInputMessage?.userInputMessageContext?.toolResults) result.push(m);
+    } else if (m.userInputMessage?.userInputMessageContext?.toolResults) {
+      const prev = result[result.length - 1];
+      if (prev?.assistantResponseMessage?.toolUses) result.push(m);
+      else if (m.userInputMessage.content.trim() !== "") {
+        const { userInputMessageContext, ...rest } = m.userInputMessage;
+        const tools = userInputMessageContext.tools;
+        result.push({ userInputMessage: { ...rest, ...tools ? { userInputMessageContext: { tools } } : {} } });
+      }
+    } else {
+      result.push(m);
+    }
+  }
+  return result;
+}
+function injectSyntheticToolCalls(history) {
+  const validIds = /* @__PURE__ */ new Set();
+  for (const entry of history) {
+    for (const tu of entry.assistantResponseMessage?.toolUses ?? []) {
+      if (tu.toolUseId) validIds.add(tu.toolUseId);
+    }
+  }
+  const result = [];
+  for (const entry of history) {
+    const toolResults = entry.userInputMessage?.userInputMessageContext?.toolResults;
+    if (toolResults) {
+      const orphaned = toolResults.filter((tr) => !validIds.has(tr.toolUseId));
+      if (orphaned.length > 0) {
+        result.push({
+          assistantResponseMessage: {
+            content: "Tool calls were made.",
+            toolUses: orphaned.map((tr) => ({ name: "unknown_tool", toolUseId: tr.toolUseId, input: {} }))
+          }
+        });
+        for (const tr of orphaned) validIds.add(tr.toolUseId);
+      }
+    }
+    result.push(entry);
+  }
+  return result;
+}
+function prepareHistory(history, keepNewestBoundedImage = true) {
+  return injectSyntheticToolCalls(sanitizeHistory(stripHistoryImages(history, keepNewestBoundedImage)));
+}
+function assertHistoryWithinLimit(history, limit) {
+  const size = JSON.stringify(history).length;
+  if (size > limit) {
+    throw new Error(
+      `Kiro API error: context_length_exceeded (local history ${size} chars / ${history.length} entries exceeds ${limit}-char limit)`
+    );
+  }
+}
+function extractToolNamesFromHistory(history) {
+  const names = /* @__PURE__ */ new Set();
+  for (const entry of history) {
+    for (const tu of entry.assistantResponseMessage?.toolUses ?? []) {
+      if (tu.name) names.add(tu.name);
+    }
+  }
+  return names;
+}
+function addPlaceholderTools(tools, history) {
+  const historyNames = extractToolNamesFromHistory(history);
+  if (historyNames.size === 0) return tools;
+  const existing = new Set(tools.map((t) => t.toolSpecification?.name).filter(Boolean));
+  const missing = Array.from(historyNames).filter((n) => !existing.has(n));
+  if (missing.length === 0) return tools;
+  return [
+    ...tools,
+    ...missing.map((name) => ({
+      toolSpecification: {
+        name,
+        description: "Tool",
+        inputSchema: { json: { type: "object", properties: {} } }
+      }
+    }))
+  ];
 }
 
 // src/invoke-tool-parser.ts
@@ -5808,6 +5832,17 @@ function createResponseHeaderDeadline(callerSignal, timeoutMs) {
 }
 var skipProfileResolutionForTests = false;
 var TEST_PROFILE_ARN = "arn:aws:codewhisperer:us-east-1:000000000000:profile/test";
+function prependToOpeningUserEntry(entries, systemPrompt) {
+  const index = entries.findIndex((entry) => entry.userInputMessage !== void 0);
+  const opening = entries[index]?.userInputMessage;
+  if (!opening) return entries;
+  const content = opening.content ? `${systemPrompt}
+
+${opening.content}` : systemPrompt;
+  const next = [...entries];
+  next[index] = { userInputMessage: { ...opening, content } };
+  return next;
+}
 function describeAttempts(count) {
   return count === 1 ? "1 attempt" : `${count} attempts`;
 }
@@ -6151,18 +6186,25 @@ ${currentContent}`;
         if (repair.diagnostics.length > 0) {
           debugLog("request.invariants", { errors: repair.diagnostics, remaining: repair.remaining });
         }
-        const repairedCurrent = repair.entries[repair.entries.length - 1]?.userInputMessage;
+        const wireEntries = effectiveSystemPrompt && !systemPrepended && firstMsg?.role !== "user" ? prependToOpeningUserEntry(repair.entries, effectiveSystemPrompt) : repair.entries;
+        const repairedCurrent = wireEntries[wireEntries.length - 1]?.userInputMessage;
         let wireHistory;
         let wireContent;
         let wireUimc;
         if (repairedCurrent) {
-          wireHistory = repair.entries.slice(0, -1);
+          wireHistory = wireEntries.slice(0, -1);
           wireContent = repairedCurrent.content;
           wireUimc = repairedCurrent.userInputMessageContext;
         } else {
-          wireHistory = [];
-          wireContent = currentContent || EMPTY_CONTENT_PLACEHOLDER;
-          wireUimc = uimc?.tools?.length ? { tools: uimc.tools } : void 0;
+          throw new Error(
+            "Kiro history repair removed the current message; refusing to send a request without the current turn"
+          );
+        }
+        const sentToolResults = wireUimc?.toolResults?.length ?? 0;
+        if (currentToolResults.length > 0 && sentToolResults === 0) {
+          console.warn(
+            `[pi-provider-kiro] repair discarded all ${currentToolResults.length} current tool result(s) \u2014 no issuing tool call survived; the model will not see this tool output`
+          );
         }
         if (repair.remaining.length > 0) {
           const structural = repair.remaining.filter((e) => isKiroToolStructureRule(e.rule));

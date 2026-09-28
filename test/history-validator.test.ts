@@ -11,6 +11,7 @@ import {
 } from "../src/history-validator.js";
 import {
   EMPTY_CONTENT_PLACEHOLDER,
+  HISTORY_OMITTED_OPENER,
   type KiroHistoryEntry,
   type KiroToolResult,
   type KiroToolUse,
@@ -273,11 +274,53 @@ describe("Feature 11: History Validation", () => {
       expect(repaired.remaining).toEqual([]);
     });
 
-    it("drops leading entries until the conversation opens on a real user message", () => {
+    it("opens a conversation that starts on an assistant with a synthetic user turn", () => {
       const entries = [assistantEntry("stray"), userEntry("go"), assistantEntry("ok"), userEntry("more")];
       const repaired = repairKiroConversation(entries);
-      expect(repaired.entries[0].userInputMessage?.content).toBe("go");
+      expect(repaired.entries[0].userInputMessage?.content).toBe(HISTORY_OMITTED_OPENER);
+      expect(repaired.entries[1].assistantResponseMessage?.content).toBe("stray");
+      expect(repaired.entries[2].userInputMessage?.content).toBe("go");
       expect(repaired.remaining).toEqual([]);
+    });
+
+    // Observed 2026-09-28: a host replayed a context that began mid tool loop
+    // (its user request cut by a size budget) and the next user utterance was
+    // merged into a tool-result carrier. The old step 1 dropped every entry
+    // until a text-only user message — there was none, so the whole
+    // conversation, current tool results included, collapsed and the model
+    // looped asking what the task was.
+    it("keeps a mid-turn tool loop, the merged user text, and the current results", () => {
+      const entries = [
+        assistantEntry("", [use("tc1")]),
+        userEntry("", [result("tc1")]),
+        assistantEntry("", [use("tc2")]),
+        userEntry("SYSTEM\n\nsometimes the data is missing", [result("tc2")]),
+        assistantEntry("", [use("tc3")]),
+        userEntry("", [result("tc3")]),
+      ];
+      const repaired = repairKiroConversation(entries);
+      expect(repaired.entries).toHaveLength(entries.length + 1);
+      expect(repaired.entries[0].userInputMessage?.content).toBe(HISTORY_OMITTED_OPENER);
+      const texts = repaired.entries.map((entry) => entry.userInputMessage?.content ?? "");
+      expect(texts.some((text) => text.includes("sometimes the data is missing"))).toBe(true);
+      const current = repaired.entries[repaired.entries.length - 1].userInputMessage;
+      expect(current?.userInputMessageContext?.toolResults?.map((tr) => tr.toolUseId)).toEqual(["tc3"]);
+      expect(repaired.remaining).toEqual([]);
+    });
+
+    it("keeps the text of a leading carrier and drops only its orphaned results", () => {
+      const entries = [userEntry("look at this", [result("gone")]), assistantEntry("ok"), userEntry("more")];
+      const repaired = repairKiroConversation(entries);
+      expect(repaired.entries[0].userInputMessage?.content).toBe("look at this");
+      expect(repaired.entries[0].userInputMessage?.userInputMessageContext?.toolResults).toBeUndefined();
+      expect(repaired.entries).toHaveLength(3);
+    });
+
+    it("never drops the current message, even when it is a lone bare carrier", () => {
+      const repaired = repairKiroConversation([userEntry("", [result("orphan")])]);
+      expect(repaired.entries).toHaveLength(1);
+      expect(repaired.entries[0].userInputMessage?.userInputMessageContext?.toolResults).toBeUndefined();
+      expect(repaired.entries[0].userInputMessage?.content).toBe(EMPTY_CONTENT_PLACEHOLDER);
     });
 
     it("drops a leading bare tool-result carrier", () => {

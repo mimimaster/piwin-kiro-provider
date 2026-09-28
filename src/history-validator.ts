@@ -15,7 +15,12 @@
 // `repairKiroConversation` returns a corrected conversation plus diagnostics
 // and callers decide whether to care.
 
-import { EMPTY_CONTENT_PLACEHOLDER, type KiroHistoryEntry, type KiroToolResult } from "./transform.js";
+import {
+  EMPTY_CONTENT_PLACEHOLDER,
+  HISTORY_OMITTED_OPENER,
+  type KiroHistoryEntry,
+  type KiroToolResult,
+} from "./transform.js";
 
 /** Identifiers for the seven invariants. Names match kiro-agent's
  *  `ValidationRule` enum so diagnostics are greppable across both codebases. */
@@ -252,6 +257,48 @@ export function validateKiroConversation(entries: KiroHistoryEntry[]): KiroValid
   return { valid: errors.length === 0, errors };
 }
 
+/**
+ * Make a conversation open on a user turn without discarding context.
+ *
+ * The previous rule dropped leading entries until a text-only user message
+ * appeared. When the input starts mid tool loop, no such message exists
+ * before the loop ends, so the drop cascaded through every tool pair, every
+ * user utterance merged into a carrier, and — for the whole conversation —
+ * the current message itself. Instead:
+ *
+ * - a leading carrier with no text answers nothing and says nothing: drop it
+ *   (never the last entry when `keepLast`, which is the current message);
+ * - a leading carrier with text keeps its text and loses only the orphaned
+ *   results (the text is a real user utterance, often the system prompt too);
+ * - a leading assistant gets {@link HISTORY_OMITTED_OPENER} in front of it, so
+ *   its tool uses stay paired with their results.
+ */
+export function openOnUserTurn(
+  entries: KiroHistoryEntry[],
+  modelId: string,
+  options: { keepLast: boolean },
+): KiroHistoryEntry[] {
+  let working = entries;
+  const minLength = options.keepLast ? 1 : 0;
+  while (working.length > minLength && isUserEntry(working[0]) && hasToolResults(working[0]) && !hasText(working[0]))
+    working = working.slice(1);
+  const first = working[0];
+  if (isUserEntry(first) && hasToolResults(first) && hasText(first)) {
+    const { userInputMessageContext, ...rest } = first?.userInputMessage as NonNullable<
+      KiroHistoryEntry["userInputMessage"]
+    >;
+    const tools = userInputMessageContext?.tools;
+    return [
+      { userInputMessage: { ...rest, ...(tools ? { userInputMessageContext: { tools } } : {}) } },
+      ...working.slice(1),
+    ];
+  }
+  if (isAssistantEntry(first)) {
+    return [{ userInputMessage: { content: HISTORY_OMITTED_OPENER, modelId, origin: "KIRO_CLI" } }, ...working];
+  }
+  return working;
+}
+
 /** Assembles the conversation this provider actually sends: history plus the
  *  current user message. */
 export function kiroConversationEntries(
@@ -275,8 +322,10 @@ export interface KiroRepairResult {
  * Validates and repairs, rather than throwing. Mirrors what kiro-agent's
  * sanitizer does, in this provider's terms:
  *
- * 1. Drop leading entries until the conversation starts with a user message
- *    that is not a bare tool-result carrier.
+ * 1. Open on a user turn via {@link openOnUserTurn}: drop leading bare
+ *    carriers, keep the text of a leading carrier, and give a leading
+ *    assistant a synthetic opener. The last entry (the current message) is
+ *    never dropped.
  * 2. Consolidate runs of adjacent tool-result-only user messages into one.
  *    This runs **before** orphan-stripping on purpose: a run's later carriers
  *    are preceded by a user entry, not the assistant that issued the tool uses,
@@ -299,9 +348,8 @@ export function repairKiroConversation(entries: KiroHistoryEntry[]): KiroRepairR
   // A synthesized user turn must declare the same model as its neighbours.
   const modelId = entries.find((e) => e.userInputMessage?.modelId)?.userInputMessage?.modelId ?? "";
 
-  // 1. Leading entries that cannot start a conversation.
-  let working = [...entries];
-  while (working.length > 0 && (!isUserEntry(working[0]) || hasToolResults(working[0]))) working = working.slice(1);
+  // 1. Open on a user turn without discarding context.
+  let working = [...openOnUserTurn(entries, modelId, { keepLast: true })];
 
   // 2. Consolidate adjacent tool-result-only user messages. Must precede the
   //    orphan pass: a later carrier in such a run is preceded by a user entry,

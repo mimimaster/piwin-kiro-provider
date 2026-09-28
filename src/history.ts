@@ -1,5 +1,6 @@
 // Feature 6: History Management
 
+import { openOnUserTurn } from "./history-validator.js";
 import type { KiroHistoryEntry, KiroToolSpec } from "./transform.js";
 
 export const HISTORY_LIMIT = 850000;
@@ -38,12 +39,10 @@ export function stripHistoryImages(history: KiroHistoryEntry[], keepNewestBounde
 }
 
 export function sanitizeHistory(history: KiroHistoryEntry[]): KiroHistoryEntry[] {
-  // Strip leading entries that would make the history invalid
-  while (
-    history.length > 0 &&
-    (!history[0]?.userInputMessage || history[0].userInputMessage.userInputMessageContext?.toolResults)
-  )
-    history = history.slice(1);
+  // Open on a user turn by salvaging, not dropping, a mid-turn prefix — see
+  // `openOnUserTurn` for why dropping cascades into a context wipe.
+  const modelId = history.find((entry) => entry.userInputMessage?.modelId)?.userInputMessage?.modelId ?? "";
+  history = openOnUserTurn(history, modelId, { keepLast: false });
   const result: KiroHistoryEntry[] = [];
   for (let i = 0; i < history.length; i++) {
     const m = history[i];
@@ -57,11 +56,17 @@ export function sanitizeHistory(history: KiroHistoryEntry[]): KiroHistoryEntry[]
     } else if (m.userInputMessage?.userInputMessageContext?.toolResults) {
       const prev = result[result.length - 1];
       if (prev?.assistantResponseMessage?.toolUses) result.push(m);
+      else if (m.userInputMessage.content.trim() !== "") {
+        // The results answer nothing, but the text is a user utterance merged
+        // into this carrier; keep it and drop only the orphaned results.
+        const { userInputMessageContext, ...rest } = m.userInputMessage;
+        const tools = userInputMessageContext.tools;
+        result.push({ userInputMessage: { ...rest, ...(tools ? { userInputMessageContext: { tools } } : {}) } });
+      }
     } else {
       result.push(m);
     }
   }
-  // Leading invalid entries already stripped above
   return result;
 }
 

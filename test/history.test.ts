@@ -11,7 +11,13 @@ import {
   sanitizeHistory,
   stripHistoryImages,
 } from "../src/history.js";
-import type { KiroHistoryEntry, KiroToolResult, KiroToolSpec, KiroToolUse } from "../src/transform.js";
+import {
+  HISTORY_OMITTED_OPENER,
+  type KiroHistoryEntry,
+  type KiroToolResult,
+  type KiroToolSpec,
+  type KiroToolUse,
+} from "../src/transform.js";
 
 const userEntry = (content: string, toolResults?: KiroToolResult[]): KiroHistoryEntry => ({
   userInputMessage: {
@@ -56,9 +62,33 @@ describe("Feature 6: History Management", () => {
       expect(sanitizeHistory(h)).toHaveLength(3);
     });
 
-    it("drops orphaned toolResult without preceding toolUses", () => {
-      const h = [userEntry("results", [{ toolUseId: "tc1", content: [{ text: "ok" }], status: "success" }])];
+    it("drops a bare orphaned toolResult without preceding toolUses", () => {
+      const h = [userEntry("", [{ toolUseId: "tc1", content: [{ text: "ok" }], status: "success" }])];
       expect(sanitizeHistory(h)).toHaveLength(0);
+    });
+
+    it("keeps the user text of an orphaned carrier and drops only its results", () => {
+      const h = [userEntry("results", [{ toolUseId: "tc1", content: [{ text: "ok" }], status: "success" }])];
+      const r = sanitizeHistory(h);
+      expect(r).toHaveLength(1);
+      expect(r[0].userInputMessage?.content).toBe("results");
+      expect(r[0].userInputMessage?.userInputMessageContext?.toolResults).toBeUndefined();
+    });
+
+    it("keeps a history that opens mid tool loop instead of wiping it", () => {
+      const tr = (id: string) => [{ toolUseId: id, content: [{ text: "ok" }], status: "success" as const }];
+      const use = (id: string) => [{ name: "bash", toolUseId: id, input: {} }];
+      const h = [
+        assistantEntry("", use("tc1")),
+        userEntry("", tr("tc1")),
+        assistantEntry("", use("tc2")),
+        userEntry("SYSTEM\n\nsometimes the data is missing", tr("tc2")),
+      ];
+      const r = sanitizeHistory(h);
+      expect(r).toHaveLength(5);
+      expect(r[0].userInputMessage?.content).toBe(HISTORY_OMITTED_OPENER);
+      expect(r[4].userInputMessage?.content).toContain("sometimes the data is missing");
+      expect(r[4].userInputMessage?.userInputMessageContext?.toolResults?.[0]?.toolUseId).toBe("tc2");
     });
 
     it("strips leading toolResults entry and keeps subsequent valid entries (truncation bug)", () => {

@@ -2287,14 +2287,80 @@ describe("Feature 9: Streaming Integration", () => {
     const currentMsg = sent.conversationState.currentMessage.userInputMessage;
     // The orphan is gone — sending it is what earns the 400.
     expect(currentMsg.userInputMessageContext?.toolResults ?? []).toHaveLength(0);
-    // The tool catalog survives, and the turn still has a payload.
+    // The tool catalog survives, and the turn still has a payload. The system
+    // prompt had no historical user entry to ride on, so it opens this turn.
     expect(currentMsg.userInputMessageContext?.tools).toBeDefined();
-    expect(currentMsg.content).toBe(EMPTY_CONTENT_PLACEHOLDER);
+    expect(currentMsg.content).toContain("You are helpful");
+    expect(currentMsg.content.endsWith(EMPTY_CONTENT_PLACEHOLDER)).toBe(true);
     expect(sent.conversationState.history ?? []).toHaveLength(0);
     const warned = warnSpy.mock.calls.map((c) => String(c[0])).join("\n");
     expect(warned).not.toContain("outbound history");
+    expect(warned).toContain("discarded all 1 current tool result");
 
     warnSpy.mockRestore();
+    vi.unstubAllGlobals();
+  });
+
+  // Observed 2026-09-28 in piwin: a rebuilt runtime replayed a context whose
+  // opening user request had been cut by a size budget, so it began with an
+  // assistant tool call, and the next user utterance followed a tool result.
+  // Leading-entry stripping consumed the whole conversation on every step: the
+  // wire carried no history, no system prompt, no user text and no current tool
+  // results — only EMPTY_CONTENT_PLACEHOLDER — and the model looped for 100+
+  // steps running `pwd; ls` to discover a task it was never shown.
+  it("keeps history, system prompt, user text and current results for a mid-turn context", async () => {
+    const tool = (id: string) => ({ type: "toolCall" as const, id, name: "bash", arguments: { command: "ls" } });
+    const assistant = (id: string) => ({
+      role: "assistant" as const,
+      content: [tool(id)],
+      api: "kiro-api",
+      provider: "kiro",
+      model: "claude-sonnet-4-6",
+      usage: {
+        input: 0,
+        output: 0,
+        cacheRead: 0,
+        cacheWrite: 0,
+        totalTokens: 0,
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+      },
+      stopReason: "toolUse" as const,
+      timestamp: ts,
+    });
+    const toolResult = (id: string) => ({
+      role: "toolResult" as const,
+      toolCallId: id,
+      toolName: "bash",
+      content: [{ type: "text" as const, text: `out-${id}` }],
+      isError: false,
+      timestamp: ts,
+    });
+    const context: Context = {
+      systemPrompt: "SYSTEM-MARKER",
+      messages: [
+        assistant("tc1"),
+        toolResult("tc1"),
+        { role: "user", content: "the data sometimes disappears", timestamp: ts },
+        assistant("tc2"),
+        toolResult("tc2"),
+      ],
+      tools: [{ name: "bash", description: "Run", parameters: { type: "object", properties: {} } }],
+    };
+    const mockFetch = mockFetchOk('{"content":"ok"}{"contextUsagePercentage":2}');
+    vi.stubGlobal("fetch", mockFetch);
+    await collect(
+      streamKiro(makeModel({ kiroProfileArn: "arn:aws:codewhisperer:us-east-1:0:profile/X" }), context, {
+        apiKey: "tok",
+      }),
+    );
+    const sent = JSON.parse(mockFetch.mock.calls[0][1].body as string);
+    const wire = JSON.stringify(sent);
+    const currentMsg = sent.conversationState.currentMessage.userInputMessage;
+    expect(sent.conversationState.history?.length ?? 0).toBeGreaterThan(0);
+    expect(wire).toContain("SYSTEM-MARKER");
+    expect(wire).toContain("the data sometimes disappears");
+    expect(currentMsg.content).not.toBe(EMPTY_CONTENT_PLACEHOLDER);
+    expect(currentMsg.userInputMessageContext?.toolResults).toHaveLength(1);
     vi.unstubAllGlobals();
   });
 

@@ -210,6 +210,23 @@ export function resetProfileArnCache(resolved = false): void {
  * of them and spend the same shared budget, so an unqualified count is the only
  * claim the counter can actually support.
  */
+/**
+ * Kiro has no system field, so `buildHistory` prepends the system prompt to the
+ * first historical user message, or the current one. A conversation that
+ * reaches us mid-turn has neither (its opener is synthetic and the current
+ * message is a tool-result carrier), and the prompt was silently never sent.
+ * Put it on the opening user entry of the conversation actually sent.
+ */
+function prependToOpeningUserEntry(entries: KiroHistoryEntry[], systemPrompt: string): KiroHistoryEntry[] {
+  const index = entries.findIndex((entry) => entry.userInputMessage !== undefined);
+  const opening = entries[index]?.userInputMessage;
+  if (!opening) return entries;
+  const content = opening.content ? `${systemPrompt}\n\n${opening.content}` : systemPrompt;
+  const next = [...entries];
+  next[index] = { userInputMessage: { ...opening, content } };
+  return next;
+}
+
 function describeAttempts(count: number): string {
   return count === 1 ? "1 attempt" : `${count} attempts`;
 }
@@ -846,17 +863,18 @@ function streamKiroWithUsageTracking(
         }
         // Split back. Repair moves entries in only three ways, and each one keeps
         // the current message last:
-        //   - step 1 drops a prefix, never a suffix;
+        //   - step 1 drops or salvages a prefix, never the last entry;
         //   - step 4 inserts a synthetic user turn only AFTER an assistant whose
         //     uses nothing answers, and the current message is a user entry, so
         //     no assistant is ever last;
         //   - steps 2/3/5 rewrite entries in place.
-        // The one exception is total collapse: a conversation that is *only* a
-        // bare tool-result carrier has no valid opening entry, so step 1 consumes
-        // it and returns nothing. Because step 1 cannot skip past a survivor,
-        // `entries.length === 0` is the only shape where the current message is
-        // gone — anything longer keeps it at the end.
-        const repairedCurrent = repair.entries[repair.entries.length - 1]?.userInputMessage;
+        // A lone bare carrier is therefore kept and repaired in place (results
+        // stripped, catalog kept, neutral prompt) rather than collapsed.
+        const wireEntries =
+          effectiveSystemPrompt && !systemPrepended && firstMsg?.role !== "user"
+            ? prependToOpeningUserEntry(repair.entries, effectiveSystemPrompt)
+            : repair.entries;
+        const repairedCurrent = wireEntries[wireEntries.length - 1]?.userInputMessage;
         // `currentImages` is carried separately below and is not part of the
         // repaired projection, so only text + context are read back here.
         //
@@ -869,16 +887,23 @@ function streamKiroWithUsageTracking(
         let wireContent: string;
         let wireUimc: typeof uimc;
         if (repairedCurrent) {
-          wireHistory = repair.entries.slice(0, -1);
+          wireHistory = wireEntries.slice(0, -1);
           wireContent = repairedCurrent.content;
           wireUimc = repairedCurrent.userInputMessageContext;
         } else {
-          // Collapsed. Apply what repair would have applied to a lone carrier:
-          // drop the results that answer nothing (steps 3), keep any tool
-          // catalog, and give the empty turn the neutral prompt (step 5).
-          wireHistory = [];
-          wireContent = currentContent || EMPTY_CONTENT_PLACEHOLDER;
-          wireUimc = uimc?.tools?.length ? { tools: uimc.tools } : undefined;
+          // Unreachable by construction (see above). Fail loudly: sending a
+          // neutral prompt with no history and no tool results looks like a
+          // successful request, burns credits, and leaves the model looping
+          // on "what is the task?" with nothing surfacing to the user.
+          throw new Error(
+            "Kiro history repair removed the current message; refusing to send a request without the current turn",
+          );
+        }
+        const sentToolResults = wireUimc?.toolResults?.length ?? 0;
+        if (currentToolResults.length > 0 && sentToolResults === 0) {
+          console.warn(
+            `[pi-provider-kiro] repair discarded all ${currentToolResults.length} current tool result(s) — no issuing tool call survived; the model will not see this tool output`,
+          );
         }
         if (repair.remaining.length > 0) {
           const structural = repair.remaining.filter((e) => isKiroToolStructureRule(e.rule));
